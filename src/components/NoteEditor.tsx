@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import DrawCanvas from "./DrawCanvas";
-import type { Note, Stroke } from "@/lib/types";
+import type { DrawingBackground, Note, Stroke } from "@/lib/types";
 
 interface NoteEditorProps {
   note: Note;
@@ -18,6 +18,10 @@ export default function NoteEditor({ note, onUpdate }: NoteEditorProps) {
 
   function handleStrokesChange(strokes: Stroke[]) {
     touch({ strokes });
+  }
+
+  function handleBackgroundChange(background: DrawingBackground) {
+    touch({ background });
   }
 
   return (
@@ -57,7 +61,12 @@ export default function NoteEditor({ note, onUpdate }: NoteEditorProps) {
           className="flex-1 min-h-0 resize-none bg-transparent p-4 outline-none placeholder:text-zinc-400"
         />
       ) : (
-        <DrawCanvas strokes={note.strokes} onChange={handleStrokesChange} />
+        <DrawCanvas
+          strokes={note.strokes}
+          background={note.background ?? "dotted"}
+          onChange={handleStrokesChange}
+          onBackgroundChange={handleBackgroundChange}
+        />
       )}
     </div>
   );

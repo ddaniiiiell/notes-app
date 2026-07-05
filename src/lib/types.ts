@@ -6,6 +6,8 @@ export interface Notebook {
   updatedAt: number;
 }
 
+export type DrawingBackground = "dotted" | "grid" | "ruled" | "blank";
+
 export interface Stroke {
   id: string;
   points: [number, number, number][]; // x, y, pressure
@@ -19,6 +21,7 @@ export interface Note {
   title: string;
   text: string;
   strokes: Stroke[];
+  background?: DrawingBackground;
   createdAt: number;
   updatedAt: number;
 }

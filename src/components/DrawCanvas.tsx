@@ -3,58 +3,93 @@
 import { useRef, useState } from "react";
 import { getStroke } from "perfect-freehand";
 import { getSvgPathFromStroke } from "@/lib/stroke-path";
-import type { Stroke } from "@/lib/types";
+import type { DrawingBackground, Stroke } from "@/lib/types";
 
 const COLORS = ["#18181b", "#dc2626", "#2563eb", "#16a34a", "#d97706"];
 const SIZES = [2, 4, 8, 16];
 
 interface DrawCanvasProps {
   strokes: Stroke[];
+  background: DrawingBackground;
   onChange: (strokes: Stroke[]) => void;
+  onBackgroundChange: (background: DrawingBackground) => void;
 }
 
-export default function DrawCanvas({ strokes, onChange }: DrawCanvasProps) {
+const BACKGROUND_OPTIONS: { id: DrawingBackground; label: string }[] = [
+  { id: "dotted", label: "Dotted" },
+  { id: "grid", label: "Grid" },
+  { id: "ruled", label: "Ruled" },
+  { id: "blank", label: "Blank" },
+];
+
+export default function DrawCanvas({
+  strokes,
+  background,
+  onChange,
+  onBackgroundChange,
+}: DrawCanvasProps) {
   const svgRef = useRef<SVGSVGElement>(null);
   const [color, setColor] = useState(COLORS[0]);
   const [size, setSize] = useState(SIZES[1]);
   const [tool, setTool] = useState<"pen" | "eraser">("pen");
   const [activePoints, setActivePoints] = useState<[number, number, number][]>([]);
-  const drawing = useRef(false);
+  // Only one pointer draws at a time. Tracking the id lets us reject the palm
+  // and stray fingers that land while the Apple Pencil is in use.
+  const activePointerId = useRef<number | null>(null);
+  const activePointerType = useRef<string | null>(null);
+
+  function toPoint(clientX: number, clientY: number, pressure: number): [number, number, number] {
+    const rect = svgRef.current!.getBoundingClientRect();
+    return [clientX - rect.left, clientY - rect.top, pressure > 0 ? pressure : 0.5];
+  }
 
   function getPoint(e: React.PointerEvent<SVGSVGElement>): [number, number, number] {
-    const rect = svgRef.current!.getBoundingClientRect();
-    const pressure = e.pressure > 0 ? e.pressure : 0.5;
-    return [e.clientX - rect.left, e.clientY - rect.top, pressure];
+    return toPoint(e.clientX, e.clientY, e.pressure);
   }
 
   function handlePointerDown(e: React.PointerEvent<SVGSVGElement>) {
-    if (e.button !== 0 && e.pointerType !== "pen" && e.pointerType !== "touch") return;
+    if (e.pointerType === "mouse" && e.button !== 0) return;
+
+    // A stroke is already in progress: ignore extra pointers (palm, second
+    // finger). Exception — let a pen preempt an in-progress finger/palm stroke.
+    if (activePointerId.current !== null) {
+      const activeIsPen = activePointerType.current === "pen";
+      if (!(e.pointerType === "pen" && !activeIsPen)) return;
+    }
+
     svgRef.current?.setPointerCapture(e.pointerId);
+    activePointerId.current = e.pointerId;
+    activePointerType.current = e.pointerType;
 
     if (tool === "eraser") {
-      drawing.current = true;
       eraseNear(getPoint(e));
       return;
     }
 
-    drawing.current = true;
     setActivePoints([getPoint(e)]);
   }
 
   function handlePointerMove(e: React.PointerEvent<SVGSVGElement>) {
-    if (!drawing.current) return;
+    if (e.pointerId !== activePointerId.current) return;
 
     if (tool === "eraser") {
       eraseNear(getPoint(e));
       return;
     }
 
-    setActivePoints((prev) => [...prev, getPoint(e)]);
+    // Coalesced events recover the high-frequency samples Safari batches
+    // between frames, so Apple Pencil strokes stay smooth.
+    const coalesced = e.nativeEvent.getCoalescedEvents?.() ?? [];
+    const points = coalesced.length
+      ? coalesced.map((c) => toPoint(c.clientX, c.clientY, c.pressure))
+      : [getPoint(e)];
+    setActivePoints((prev) => [...prev, ...points]);
   }
 
-  function handlePointerUp() {
-    if (!drawing.current) return;
-    drawing.current = false;
+  function handlePointerUp(e: React.PointerEvent<SVGSVGElement>) {
+    if (e.pointerId !== activePointerId.current) return;
+    activePointerId.current = null;
+    activePointerType.current = null;
 
     if (tool === "eraser") return;
 
@@ -100,6 +135,30 @@ export default function DrawCanvas({ strokes, onChange }: DrawCanvasProps) {
         )
       : "";
 
+  function getBackgroundStyle() {
+    switch (background) {
+      case "grid":
+        return {
+          backgroundImage:
+            "linear-gradient(rgba(113, 113, 122, 0.2) 1px, transparent 1px), linear-gradient(90deg, rgba(113, 113, 122, 0.2) 1px, transparent 1px)",
+          backgroundSize: "24px 24px",
+        };
+      case "ruled":
+        return {
+          backgroundImage: "linear-gradient(rgba(113, 113, 122, 0.2) 1px, transparent 1px)",
+          backgroundSize: "100% 24px",
+        };
+      case "blank":
+        return { backgroundColor: "transparent" };
+      case "dotted":
+      default:
+        return {
+          backgroundImage: "radial-gradient(circle, rgba(113, 113, 122, 0.35) 1px, transparent 1px)",
+          backgroundSize: "20px 20px",
+        };
+    }
+  }
+
   return (
     <div className="flex flex-col flex-1 min-h-0">
       <div className="flex flex-wrap items-center gap-3 border-b border-zinc-200 dark:border-zinc-800 px-3 py-2">
@@ -139,6 +198,21 @@ export default function DrawCanvas({ strokes, onChange }: DrawCanvasProps) {
             </button>
           ))}
         </div>
+        <div className="flex items-center gap-1 rounded bg-zinc-100 p-1 dark:bg-zinc-800">
+          {BACKGROUND_OPTIONS.map((option) => (
+            <button
+              key={option.id}
+              onClick={() => onBackgroundChange(option.id)}
+              className={`rounded px-2 py-1 text-xs font-medium ${
+                background === option.id
+                  ? "bg-white text-zinc-900 shadow-sm dark:bg-zinc-700 dark:text-zinc-100"
+                  : "text-zinc-600 dark:text-zinc-300"
+              }`}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
         <button
           onClick={() => setTool(tool === "eraser" ? "pen" : "eraser")}
           className={`rounded px-2 py-1 text-sm ${
@@ -166,11 +240,11 @@ export default function DrawCanvas({ strokes, onChange }: DrawCanvasProps) {
       <svg
         ref={svgRef}
         className="flex-1 min-h-0 touch-none bg-white dark:bg-zinc-950"
-        style={{ backgroundImage: "radial-gradient(circle, #d4d4d8 1px, transparent 1px)", backgroundSize: "20px 20px" }}
+        style={getBackgroundStyle()}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
-        onPointerLeave={handlePointerUp}
+        onPointerCancel={handlePointerUp}
       >
         {strokes.map((stroke) => (
           <path

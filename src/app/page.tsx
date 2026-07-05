@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Sidebar from "@/components/Sidebar";
 import NoteList from "@/components/NoteList";
 import NoteEditor from "@/components/NoteEditor";
@@ -26,6 +26,35 @@ export default function Home() {
   const [allNotesCache, setAllNotesCache] = useState<Note[]>([]);
   const [loaded, setLoaded] = useState(false);
   const saveTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+  // The latest unsaved payload per note, so a pending debounced save can be
+  // flushed immediately if the page is backgrounded or closed.
+  const pendingSaves = useRef<Map<string, Note>>(new Map());
+
+  const flushPendingSaves = useCallback(() => {
+    const timers = saveTimers.current;
+    for (const [id, note] of pendingSaves.current) {
+      const timer = timers.get(id);
+      if (timer) clearTimeout(timer);
+      timers.delete(id);
+      void putNote(note);
+    }
+    pendingSaves.current.clear();
+  }, []);
+
+  useEffect(() => {
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "hidden") flushPendingSaves();
+    };
+    // pagehide + visibilitychange are the reliable "app is going away" signals
+    // on iOS Safari, where beforeunload often never fires.
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    window.addEventListener("pagehide", flushPendingSaves);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      window.removeEventListener("pagehide", flushPendingSaves);
+      flushPendingSaves();
+    };
+  }, [flushPendingSaves]);
 
   useEffect(() => {
     (async () => {
@@ -104,6 +133,7 @@ export default function Home() {
       title: "",
       text: "",
       strokes: [],
+      background: "dotted",
       createdAt: now,
       updatedAt: now,
     };
@@ -125,13 +155,15 @@ export default function Home() {
     setAllNotesCache((prev) => prev.map((n) => (n.id === updated.id ? updated : n)));
 
     const timers = saveTimers.current;
+    pendingSaves.current.set(updated.id, updated);
     const existing = timers.get(updated.id);
     if (existing) clearTimeout(existing);
     timers.set(
       updated.id,
       setTimeout(() => {
-        putNote(updated);
+        void putNote(updated);
         timers.delete(updated.id);
+        pendingSaves.current.delete(updated.id);
       }, 400)
     );
   }
