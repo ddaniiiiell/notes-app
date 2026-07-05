@@ -143,6 +143,7 @@ export default function Home() {
       title: "",
       text: "",
       strokes: [],
+      textBoxes: [],
       background: "dotted",
       createdAt: now,
       updatedAt: now,

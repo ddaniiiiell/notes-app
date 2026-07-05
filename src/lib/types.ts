@@ -15,12 +15,20 @@ export interface Stroke {
   size: number;
 }
 
+export interface TextBox {
+  id: string;
+  x: number;
+  y: number;
+  text: string;
+}
+
 export interface Note {
   id: string;
   notebookId: string;
   title: string;
-  text: string;
+  text: string; // flattened text-box contents, kept in sync for search/previews
   strokes: Stroke[];
+  textBoxes?: TextBox[];
   background?: DrawingBackground;
   createdAt: number;
   updatedAt: number;

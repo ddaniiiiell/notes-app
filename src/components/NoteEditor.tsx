@@ -1,8 +1,7 @@
 "use client";
 
-import { useState } from "react";
-import DrawCanvas from "./DrawCanvas";
-import type { DrawingBackground, Note, Stroke } from "@/lib/types";
+import NotePage from "./NotePage";
+import type { DrawingBackground, Note, Stroke, TextBox } from "@/lib/types";
 
 interface NoteEditorProps {
   note: Note;
@@ -10,14 +9,22 @@ interface NoteEditorProps {
 }
 
 export default function NoteEditor({ note, onUpdate }: NoteEditorProps) {
-  const [tab, setTab] = useState<"text" | "draw">("text");
-
   function touch(patch: Partial<Note>) {
     onUpdate({ ...note, ...patch, updatedAt: Date.now() });
   }
 
+  // Legacy notes stored their text in `note.text` with no text boxes; surface
+  // that as a single box in the top-left so nothing is lost.
+  const textBoxes: TextBox[] =
+    note.textBoxes ?? (note.text ? [{ id: `${note.id}-legacy`, x: 24, y: 24, text: note.text }] : []);
+
   function handleStrokesChange(strokes: Stroke[]) {
     touch({ strokes });
+  }
+
+  function handleTextBoxesChange(next: TextBox[]) {
+    // Keep the flattened `text` in sync so search and list previews keep working.
+    touch({ textBoxes: next, text: next.map((b) => b.text).join("\n") });
   }
 
   function handleBackgroundChange(background: DrawingBackground) {
@@ -26,48 +33,23 @@ export default function NoteEditor({ note, onUpdate }: NoteEditorProps) {
 
   return (
     <div className="flex flex-1 min-h-0 flex-col">
-      <div className="flex items-center justify-between border-b border-zinc-200 dark:border-zinc-800 px-4 py-3">
+      <div className="flex items-center border-b border-zinc-200 dark:border-zinc-800 px-4 py-3">
         <input
           value={note.title}
           onChange={(e) => touch({ title: e.target.value })}
           placeholder="Untitled note"
           className="flex-1 bg-transparent text-lg font-semibold outline-none placeholder:text-zinc-400"
         />
-        <div className="flex rounded-lg bg-zinc-100 dark:bg-zinc-800 p-0.5 text-sm">
-          <button
-            onClick={() => setTab("text")}
-            className={`rounded-md px-3 py-1 ${
-              tab === "text" ? "bg-white dark:bg-zinc-700 shadow-sm" : "text-zinc-500"
-            }`}
-          >
-            Text
-          </button>
-          <button
-            onClick={() => setTab("draw")}
-            className={`rounded-md px-3 py-1 ${
-              tab === "draw" ? "bg-white dark:bg-zinc-700 shadow-sm" : "text-zinc-500"
-            }`}
-          >
-            Draw
-          </button>
-        </div>
       </div>
 
-      {tab === "text" ? (
-        <textarea
-          value={note.text}
-          onChange={(e) => touch({ text: e.target.value })}
-          placeholder="Start writing…"
-          className="flex-1 min-h-0 resize-none bg-transparent p-4 outline-none placeholder:text-zinc-400"
-        />
-      ) : (
-        <DrawCanvas
-          strokes={note.strokes}
-          background={note.background ?? "dotted"}
-          onChange={handleStrokesChange}
-          onBackgroundChange={handleBackgroundChange}
-        />
-      )}
+      <NotePage
+        strokes={note.strokes}
+        textBoxes={textBoxes}
+        background={note.background ?? "dotted"}
+        onStrokesChange={handleStrokesChange}
+        onTextBoxesChange={handleTextBoxesChange}
+        onBackgroundChange={handleBackgroundChange}
+      />
     </div>
   );
 }
