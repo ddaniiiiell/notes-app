@@ -20,6 +20,7 @@ export interface TextBox {
   x: number;
   y: number;
   text: string;
+  width?: number;
 }
 
 export interface Note {

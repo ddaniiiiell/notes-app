@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { memo, useCallback, useLayoutEffect, useRef, useState } from "react";
 import { getStroke } from "perfect-freehand";
 import { getSvgPathFromStroke } from "@/lib/stroke-path";
 import type { DrawingBackground, Stroke, TextBox } from "@/lib/types";
@@ -8,6 +8,8 @@ import type { DrawingBackground, Stroke, TextBox } from "@/lib/types";
 const COLORS = ["#18181b", "#dc2626", "#2563eb", "#16a34a", "#d97706"];
 const SIZES = [2, 4, 8, 16];
 const STROKE_OPTIONS = { thinning: 0.6, smoothing: 0.5, streamline: 0.5 };
+const DEFAULT_BOX_WIDTH = 192;
+const MIN_BOX_WIDTH = 96;
 
 type Mode = "text" | "pen" | "eraser";
 
@@ -17,6 +19,145 @@ const BACKGROUND_OPTIONS: { id: DrawingBackground; label: string }[] = [
   { id: "ruled", label: "Ruled" },
   { id: "blank", label: "Blank" },
 ];
+
+// Each committed stroke is memoized on its own reference, so appending a new
+// stroke never recomputes the geometry of the existing ones.
+const StrokePath = memo(function StrokePath({ stroke }: { stroke: Stroke }) {
+  return (
+    <path
+      d={getSvgPathFromStroke(getStroke(stroke.points, { size: stroke.size, ...STROKE_OPTIONS }))}
+      fill={stroke.color}
+    />
+  );
+});
+
+const CommittedStrokes = memo(function CommittedStrokes({ strokes }: { strokes: Stroke[] }) {
+  return (
+    <>
+      {strokes.map((stroke) => (
+        <StrokePath key={stroke.id} stroke={stroke} />
+      ))}
+    </>
+  );
+});
+
+// The drawing surface owns the high-frequency `activePoints` state on its own,
+// so an in-progress stroke re-renders only this SVG — not the committed strokes
+// (memoized above) and not the text layer in the parent. That is what keeps
+// inking smooth on the iPad instead of choking on a full-page re-render per
+// pointer sample.
+interface InkSurfaceProps {
+  strokes: Stroke[];
+  active: boolean;
+  eraser: boolean;
+  color: string;
+  size: number;
+  onBeginErase: () => void;
+  onErase: (strokes: Stroke[]) => void;
+  onCommit: (stroke: Stroke) => void;
+}
+
+function InkSurface({
+  strokes,
+  active,
+  eraser,
+  color,
+  size,
+  onBeginErase,
+  onErase,
+  onCommit,
+}: InkSurfaceProps) {
+  const svgRef = useRef<SVGSVGElement>(null);
+  const [activePoints, setActivePoints] = useState<[number, number, number][]>([]);
+  const activePointerId = useRef<number | null>(null);
+  const activePointerType = useRef<string | null>(null);
+
+  function toPoint(clientX: number, clientY: number, pressure: number): [number, number, number] {
+    const rect = svgRef.current!.getBoundingClientRect();
+    return [clientX - rect.left, clientY - rect.top, pressure > 0 ? pressure : 0.5];
+  }
+
+  function getPoint(e: React.PointerEvent): [number, number, number] {
+    return toPoint(e.clientX, e.clientY, e.pressure);
+  }
+
+  function eraseNear(point: [number, number, number]) {
+    const [x, y] = point;
+    const remaining = strokes.filter(
+      (stroke) => !stroke.points.some(([sx, sy]) => Math.hypot(sx - x, sy - y) < stroke.size + 12)
+    );
+    if (remaining.length !== strokes.length) onErase(remaining);
+  }
+
+  function handlePointerDown(e: React.PointerEvent<SVGSVGElement>) {
+    if (e.pointerType === "mouse" && e.button !== 0) return;
+
+    // Reject palm/extra fingers mid-stroke; let a pen preempt a finger stroke.
+    if (activePointerId.current !== null) {
+      const activeIsPen = activePointerType.current === "pen";
+      if (!(e.pointerType === "pen" && !activeIsPen)) return;
+    }
+
+    svgRef.current?.setPointerCapture(e.pointerId);
+    activePointerId.current = e.pointerId;
+    activePointerType.current = e.pointerType;
+
+    if (eraser) {
+      onBeginErase();
+      eraseNear(getPoint(e));
+      return;
+    }
+    setActivePoints([getPoint(e)]);
+  }
+
+  function handlePointerMove(e: React.PointerEvent<SVGSVGElement>) {
+    if (e.pointerId !== activePointerId.current) return;
+
+    if (eraser) {
+      eraseNear(getPoint(e));
+      return;
+    }
+
+    const coalesced = e.nativeEvent.getCoalescedEvents?.() ?? [];
+    const points = coalesced.length
+      ? coalesced.map((c) => toPoint(c.clientX, c.clientY, c.pressure))
+      : [getPoint(e)];
+    setActivePoints((prev) => [...prev, ...points]);
+  }
+
+  function handlePointerUp(e: React.PointerEvent<SVGSVGElement>) {
+    if (e.pointerId !== activePointerId.current) return;
+    activePointerId.current = null;
+    activePointerType.current = null;
+
+    if (eraser) return;
+
+    if (activePoints.length > 1) {
+      onCommit({ id: crypto.randomUUID(), points: activePoints, color, size });
+    }
+    setActivePoints([]);
+  }
+
+  const activeOutline =
+    activePoints.length > 1
+      ? getSvgPathFromStroke(getStroke(activePoints, { size, ...STROKE_OPTIONS }))
+      : "";
+
+  return (
+    <svg
+      ref={svgRef}
+      className="absolute inset-0 h-full w-full touch-none"
+      style={{ pointerEvents: active ? "auto" : "none" }}
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={handlePointerUp}
+      onPointerCancel={handlePointerUp}
+    >
+      <CommittedStrokes strokes={strokes} />
+      {activeOutline && <path d={activeOutline} fill={color} />}
+    </svg>
+  );
+}
 
 interface NotePageProps {
   strokes: Stroke[];
@@ -36,101 +177,28 @@ export default function NotePage({
   onBackgroundChange,
 }: NotePageProps) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const svgRef = useRef<SVGSVGElement>(null);
   const [mode, setMode] = useState<Mode>("text");
   const [color, setColor] = useState(COLORS[0]);
   const [size, setSize] = useState(SIZES[1]);
-  const [activePoints, setActivePoints] = useState<[number, number, number][]>([]);
   const [editingId, setEditingId] = useState<string | null>(null);
 
-  // Single active pointer for drawing (palm rejection — see handlePointerDown).
-  const activePointerId = useRef<number | null>(null);
-  const activePointerType = useRef<string | null>(null);
-  // Undo stack of previous stroke states, so Undo reverts draws, erases, and Clear.
-  const history = useRef<Stroke[][]>([]);
-  // In-flight text-box drag.
+  // Unified undo: each snapshot captures both layers, so Undo reverts draws,
+  // erases, Clear, and text-box create/move/resize. (Per-character text edits
+  // are left to the browser's native textarea undo.)
+  const history = useRef<{ strokes: Stroke[]; textBoxes: TextBox[] }[]>([]);
   const drag = useRef<{ id: string; startX: number; startY: number; originX: number; originY: number } | null>(null);
+  const resize = useRef<{ id: string; startX: number; originW: number } | null>(null);
 
   function pushHistory() {
-    history.current.push(strokes);
+    history.current.push({ strokes, textBoxes });
     if (history.current.length > 50) history.current.shift();
-  }
-
-  // ---- Drawing ----------------------------------------------------------
-
-  function toPoint(clientX: number, clientY: number, pressure: number): [number, number, number] {
-    const rect = svgRef.current!.getBoundingClientRect();
-    return [clientX - rect.left, clientY - rect.top, pressure > 0 ? pressure : 0.5];
-  }
-
-  function getPoint(e: React.PointerEvent): [number, number, number] {
-    return toPoint(e.clientX, e.clientY, e.pressure);
-  }
-
-  function handlePointerDown(e: React.PointerEvent<SVGSVGElement>) {
-    if (e.pointerType === "mouse" && e.button !== 0) return;
-
-    // Reject palm/extra fingers mid-stroke; let a pen preempt a finger stroke.
-    if (activePointerId.current !== null) {
-      const activeIsPen = activePointerType.current === "pen";
-      if (!(e.pointerType === "pen" && !activeIsPen)) return;
-    }
-
-    svgRef.current?.setPointerCapture(e.pointerId);
-    activePointerId.current = e.pointerId;
-    activePointerType.current = e.pointerType;
-
-    if (mode === "eraser") {
-      pushHistory(); // one snapshot per erase gesture
-      eraseNear(getPoint(e));
-      return;
-    }
-    setActivePoints([getPoint(e)]);
-  }
-
-  function handlePointerMove(e: React.PointerEvent<SVGSVGElement>) {
-    if (e.pointerId !== activePointerId.current) return;
-
-    if (mode === "eraser") {
-      eraseNear(getPoint(e));
-      return;
-    }
-
-    const coalesced = e.nativeEvent.getCoalescedEvents?.() ?? [];
-    const points = coalesced.length
-      ? coalesced.map((c) => toPoint(c.clientX, c.clientY, c.pressure))
-      : [getPoint(e)];
-    setActivePoints((prev) => [...prev, ...points]);
-  }
-
-  function handlePointerUp(e: React.PointerEvent<SVGSVGElement>) {
-    if (e.pointerId !== activePointerId.current) return;
-    activePointerId.current = null;
-    activePointerType.current = null;
-
-    if (mode === "eraser") return;
-
-    if (activePoints.length > 1) {
-      pushHistory();
-      onStrokesChange([
-        ...strokes,
-        { id: crypto.randomUUID(), points: activePoints, color, size },
-      ]);
-    }
-    setActivePoints([]);
-  }
-
-  function eraseNear(point: [number, number, number]) {
-    const [x, y] = point;
-    const remaining = strokes.filter(
-      (stroke) => !stroke.points.some(([sx, sy]) => Math.hypot(sx - x, sy - y) < stroke.size + 12)
-    );
-    if (remaining.length !== strokes.length) onStrokesChange(remaining);
   }
 
   function undo() {
     const prev = history.current.pop();
-    if (prev) onStrokesChange(prev);
+    if (!prev) return;
+    onStrokesChange(prev.strokes);
+    onTextBoxesChange(prev.textBoxes);
   }
 
   function clearAll() {
@@ -140,6 +208,16 @@ export default function NotePage({
   }
 
   // ---- Text boxes -------------------------------------------------------
+
+  // Keep every text box sized to its content after any change to the boxes.
+  // Runs only when textBoxes changes — never during an in-progress ink stroke.
+  useLayoutEffect(() => {
+    const textareas = containerRef.current?.querySelectorAll("textarea");
+    textareas?.forEach((el) => {
+      el.style.height = "auto";
+      el.style.height = `${el.scrollHeight}px`;
+    });
+  }, [textBoxes]);
 
   function handleTextLayerPointerDown(e: React.PointerEvent<HTMLDivElement>) {
     if (mode !== "text") return;
@@ -151,6 +229,7 @@ export default function NotePage({
       y: e.clientY - rect.top,
       text: "",
     };
+    pushHistory();
     onTextBoxesChange([...textBoxes, box]);
     setEditingId(box.id);
   }
@@ -166,6 +245,7 @@ export default function NotePage({
 
   function startDrag(e: React.PointerEvent, box: TextBox) {
     e.stopPropagation();
+    pushHistory();
     drag.current = { id: box.id, startX: e.clientX, startY: e.clientY, originX: box.x, originY: box.y };
     (e.currentTarget as Element).setPointerCapture(e.pointerId);
   }
@@ -182,12 +262,42 @@ export default function NotePage({
     drag.current = null;
   }
 
-  // ---- Rendering --------------------------------------------------------
+  function startResize(e: React.PointerEvent, box: TextBox) {
+    e.stopPropagation();
+    pushHistory();
+    resize.current = { id: box.id, startX: e.clientX, originW: box.width ?? DEFAULT_BOX_WIDTH };
+    (e.currentTarget as Element).setPointerCapture(e.pointerId);
+  }
 
-  const activeOutline =
-    activePoints.length > 1
-      ? getSvgPathFromStroke(getStroke(activePoints, { size, ...STROKE_OPTIONS }))
-      : "";
+  function moveResize(e: React.PointerEvent) {
+    const r = resize.current;
+    if (!r) return;
+    const width = Math.max(MIN_BOX_WIDTH, r.originW + (e.clientX - r.startX));
+    onTextBoxesChange(textBoxes.map((b) => (b.id === r.id ? { ...b, width } : b)));
+  }
+
+  function endResize() {
+    resize.current = null;
+  }
+
+  // ---- Stroke callbacks (from InkSurface) -------------------------------
+
+  const handleCommit = useCallback(
+    (stroke: Stroke) => {
+      pushHistory();
+      onStrokesChange([...strokes, stroke]);
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [strokes, textBoxes]
+  );
+
+  const handleBeginErase = useCallback(
+    () => pushHistory(),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [strokes, textBoxes]
+  );
+
+  // ---- Rendering --------------------------------------------------------
 
   function getBackgroundStyle(): React.CSSProperties {
     switch (background) {
@@ -212,12 +322,6 @@ export default function NotePage({
         };
     }
   }
-
-  const autoSize = (el: HTMLTextAreaElement | null) => {
-    if (!el) return;
-    el.style.height = "auto";
-    el.style.height = `${el.scrollHeight}px`;
-  };
 
   const modeButton = (value: Mode, label: string) => (
     <button
@@ -314,24 +418,16 @@ export default function NotePage({
         className="relative flex-1 min-h-0 overflow-hidden bg-white dark:bg-zinc-950"
         style={getBackgroundStyle()}
       >
-        <svg
-          ref={svgRef}
-          className="absolute inset-0 h-full w-full touch-none"
-          style={{ pointerEvents: mode === "text" ? "none" : "auto" }}
-          onPointerDown={handlePointerDown}
-          onPointerMove={handlePointerMove}
-          onPointerUp={handlePointerUp}
-          onPointerCancel={handlePointerUp}
-        >
-          {strokes.map((stroke) => (
-            <path
-              key={stroke.id}
-              d={getSvgPathFromStroke(getStroke(stroke.points, { size: stroke.size, ...STROKE_OPTIONS }))}
-              fill={stroke.color}
-            />
-          ))}
-          {activeOutline && <path d={activeOutline} fill={color} />}
-        </svg>
+        <InkSurface
+          strokes={strokes}
+          active={mode !== "text"}
+          eraser={mode === "eraser"}
+          color={color}
+          size={size}
+          onBeginErase={handleBeginErase}
+          onErase={onStrokesChange}
+          onCommit={handleCommit}
+        />
 
         <div
           className="absolute inset-0"
@@ -353,23 +449,31 @@ export default function NotePage({
                 </button>
               )}
               <textarea
-                ref={autoSize}
+                data-box-id={box.id}
                 value={box.text}
-                onChange={(e) => {
-                  autoSize(e.currentTarget);
-                  updateBox(box.id, e.target.value);
-                }}
+                onChange={(e) => updateBox(box.id, e.target.value)}
                 onBlur={() => removeBoxIfEmpty(box.id)}
                 onPointerDown={(e) => e.stopPropagation()}
                 readOnly={mode !== "text"}
                 autoFocus={editingId === box.id}
                 placeholder="Text…"
-                className={`block w-48 resize-none overflow-hidden bg-transparent p-1 text-sm outline-none placeholder:text-zinc-400 ${
+                style={{ width: box.width ?? DEFAULT_BOX_WIDTH }}
+                className={`block resize-none overflow-hidden bg-transparent p-1 text-sm outline-none placeholder:text-zinc-400 ${
                   mode === "text"
                     ? "rounded ring-1 ring-zinc-300 focus:ring-zinc-500 dark:ring-zinc-700"
                     : "cursor-default"
                 }`}
               />
+              {mode === "text" && (
+                <button
+                  aria-label="Resize text box"
+                  onPointerDown={(e) => startResize(e, box)}
+                  onPointerMove={moveResize}
+                  onPointerUp={endResize}
+                  onPointerCancel={endResize}
+                  className="absolute -bottom-1 -right-1 h-4 w-4 cursor-ew-resize touch-none rounded-sm bg-zinc-300 dark:bg-zinc-600"
+                />
+              )}
             </div>
           ))}
         </div>
