@@ -114,6 +114,16 @@ export default function Home() {
     setSearchQuery("");
   }
 
+  async function handleRenameNotebook(id: string, name: string) {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    const target = notebooks.find((nb) => nb.id === id);
+    if (!target || target.name === trimmed) return;
+    const updated: Notebook = { ...target, name: trimmed, updatedAt: Date.now() };
+    setNotebooks((prev) => prev.map((nb) => (nb.id === id ? updated : nb)));
+    await putNotebook(updated);
+  }
+
   async function handleDeleteNotebook(id: string) {
     await dbDeleteNotebook(id);
     const remaining = notebooks.filter((nb) => nb.id !== id);
@@ -193,6 +203,7 @@ export default function Home() {
         }}
         onCreate={handleCreateNotebook}
         onDelete={handleDeleteNotebook}
+        onRename={handleRenameNotebook}
         searchQuery={searchQuery}
         onSearchChange={setSearchQuery}
       />

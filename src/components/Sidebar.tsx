@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useRef, useState } from "react";
 import type { Notebook } from "@/lib/types";
 
 interface SidebarProps {
@@ -8,6 +9,7 @@ interface SidebarProps {
   onSelect: (id: string) => void;
   onCreate: () => void;
   onDelete: (id: string) => void;
+  onRename: (id: string, name: string) => void;
   searchQuery: string;
   onSearchChange: (query: string) => void;
 }
@@ -18,9 +20,28 @@ export default function Sidebar({
   onSelect,
   onCreate,
   onDelete,
+  onRename,
   searchQuery,
   onSearchChange,
 }: SidebarProps) {
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [draftName, setDraftName] = useState("");
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (editingId) inputRef.current?.select();
+  }, [editingId]);
+
+  function startEditing(nb: Notebook) {
+    setEditingId(nb.id);
+    setDraftName(nb.name);
+  }
+
+  function commitEditing() {
+    if (editingId) onRename(editingId, draftName);
+    setEditingId(null);
+  }
+
   return (
     <div className="flex w-56 shrink-0 flex-col border-r border-zinc-200 dark:border-zinc-800">
       <div className="p-3">
@@ -55,24 +76,55 @@ export default function Sidebar({
                 : "hover:bg-zinc-50 dark:hover:bg-zinc-900"
             }`}
             onClick={() => onSelect(nb.id)}
+            onDoubleClick={() => startEditing(nb)}
           >
-            <span className="flex items-center gap-2 truncate">
+            <span className="flex min-w-0 flex-1 items-center gap-2">
               <span
                 className="h-2 w-2 shrink-0 rounded-full"
                 style={{ backgroundColor: nb.color }}
               />
-              <span className="truncate">{nb.name}</span>
+              {editingId === nb.id ? (
+                <input
+                  ref={inputRef}
+                  autoFocus
+                  value={draftName}
+                  onChange={(e) => setDraftName(e.target.value)}
+                  onClick={(e) => e.stopPropagation()}
+                  onBlur={commitEditing}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") commitEditing();
+                    if (e.key === "Escape") setEditingId(null);
+                  }}
+                  className="min-w-0 flex-1 rounded border border-zinc-300 dark:border-zinc-600 bg-white dark:bg-zinc-900 px-1 py-0.5 outline-none"
+                />
+              ) : (
+                <span className="truncate">{nb.name}</span>
+              )}
             </span>
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                onDelete(nb.id);
-              }}
-              className="hidden shrink-0 text-zinc-400 hover:text-red-600 group-hover:block"
-              aria-label={`Delete ${nb.name}`}
-            >
-              ×
-            </button>
+            {editingId !== nb.id && (
+              <div className="hidden shrink-0 items-center gap-1 group-hover:flex">
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    startEditing(nb);
+                  }}
+                  className="text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100"
+                  aria-label={`Rename ${nb.name}`}
+                >
+                  ✎
+                </button>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onDelete(nb.id);
+                  }}
+                  className="text-zinc-400 hover:text-red-600"
+                  aria-label={`Delete ${nb.name}`}
+                >
+                  ×
+                </button>
+              </div>
+            )}
           </div>
         ))}
       </div>
